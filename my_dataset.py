@@ -21,6 +21,8 @@ class VOCDataSet(Dataset):
 
         txt_list = os.path.join(self.root, "ImageSets", "Main", train_set)
 
+        # 从train或者val.txt读取文件名，拼成对应的图片的标注数据索引
+        # https://fastly.jsdelivr.net/gh/hzzgenius02/Image@main/ssd/Snipaste_2023-04-11_17-32-16.png
         with open(txt_list) as read:
             self.xml_list = [os.path.join(self.annotations_root, line.strip() + ".xml")
                              for line in read.readlines() if len(line.strip()) > 0]
@@ -33,11 +35,13 @@ class VOCDataSet(Dataset):
 
         self.transforms = transforms
 
+    # len(dataset)返回的是xml的数量，即用来训练或者测试的图像数
     def __len__(self):
         return len(self.xml_list)
 
     def __getitem__(self, idx):
         # read xml
+        # print('read xml')
         xml_path = self.xml_list[idx]
         with open(xml_path) as fid:
             xml_str = fid.read()
@@ -108,7 +112,7 @@ class VOCDataSet(Dataset):
 
     def parse_xml_to_dict(self, xml):
         """
-        将xml文件解析成字典形式，参考tensorflow的recursive_parse_xml_to_dict
+        将xml文件（树形结构）解析成字典形式，参考tensorflow的recursive_parse_xml_to_dict
         Args：
             xml: xml tree obtained by parsing XML file contents using lxml.etree
 
@@ -185,59 +189,4 @@ class VOCDataSet(Dataset):
     @staticmethod
     def collate_fn(batch):
         images, targets = tuple(zip(*batch))
-        # images = torch.stack(images, dim=0)
-        #
-        # boxes = []
-        # labels = []
-        # img_id = []
-        # for t in targets:
-        #     boxes.append(t['boxes'])
-        #     labels.append(t['labels'])
-        #     img_id.append(t["image_id"])
-        # targets = {"boxes": torch.stack(boxes, dim=0),
-        #            "labels": torch.stack(labels, dim=0),
-        #            "image_id": torch.as_tensor(img_id)}
-
         return images, targets
-
-# import transforms
-# from draw_box_utils import draw_objs
-# from PIL import Image
-# import json
-# import matplotlib.pyplot as plt
-# import torchvision.transforms as ts
-# import random
-#
-# # read class_indict
-# category_index = {}
-# try:
-#     json_file = open('./pascal_voc_classes.json', 'r')
-#     class_dict = json.load(json_file)
-#     category_index = {str(v): str(k) for k, v in class_dict.items()}
-# except Exception as e:
-#     print(e)
-#     exit(-1)
-#
-# data_transform = {
-#     "train": transforms.Compose([transforms.ToTensor(),
-#                                  transforms.RandomHorizontalFlip(0.5)]),
-#     "val": transforms.Compose([transforms.ToTensor()])
-# }
-#
-# # load train data set
-# train_data_set = VOCDataSet(os.getcwd(), "2012", data_transform["train"], "train.txt")
-# print(len(train_data_set))
-# for index in random.sample(range(0, len(train_data_set)), k=5):
-#     img, target = train_data_set[index]
-#     img = ts.ToPILImage()(img)
-#     plot_img = draw_objs(img,
-#                          target["boxes"].numpy(),
-#                          target["labels"].numpy(),
-#                          np.ones(target["labels"].shape[0]),
-#                          category_index=category_index,
-#                          box_thresh=0.5,
-#                          line_thickness=3,
-#                          font='arial.ttf',
-#                          font_size=20)
-#     plt.imshow(plot_img)
-#     plt.show()

@@ -9,20 +9,13 @@ from .utils import dboxes300_coco, Encoder, PostProcess
 class Backbone(nn.Module):
     def __init__(self, pretrain_path=None):
         super(Backbone, self).__init__()
-        net = resnet50()
-        self.out_channels = [1024, 512, 512, 256, 256, 256]
+        # resnet的conv1到layer3，去resnet，转为层的叠加
+        self.feature_extractor = nn.Sequential(*list(resnet50().children()))
+        self.out_channels = [1024, 512, 512, 256, 256, 256]  # 6个预测特征层
 
+        # 加载预训练权重文件
         if pretrain_path is not None:
             net.load_state_dict(torch.load(pretrain_path))
-
-        self.feature_extractor = nn.Sequential(*list(net.children())[:7])
-
-        conv4_block1 = self.feature_extractor[-1][0]
-
-        # 修改conv4_block1的步距，从2->1
-        conv4_block1.conv1.stride = (1, 1)
-        conv4_block1.conv2.stride = (1, 1)
-        conv4_block1.downsample[0].stride = (1, 1)
 
     def forward(self, x):
         x = self.feature_extractor(x)
@@ -39,36 +32,36 @@ class SSD300(nn.Module):
         self.feature_extractor = backbone
 
         self.num_classes = num_classes
-        # out_channels = [1024, 512, 512, 256, 256, 256] for resnet50
+        # out_channels = 1024
         self._build_additional_features(self.feature_extractor.out_channels)
-        self.num_defaults = [4, 6, 6, 6, 4, 4]
+        self.num_defaults = [4, 6, 6, 6, 4, 4]  # 预测特征层的每个cell生成的default box数
         location_extractors = []
         confidence_extractors = []
 
         # out_channels = [1024, 512, 512, 256, 256, 256] for resnet50
         for nd, oc in zip(self.num_defaults, self.feature_extractor.out_channels):
-            # nd is number_default_boxes, oc is output_channel
+            # oc是预测特征层的输出维度，nd是某层上每个像素的预测框数，分别有四个参数
+            # 如[预测框1：中心点x，中心点y，长度，宽度；预测框2：...]
             location_extractors.append(nn.Conv2d(oc, nd * 4, kernel_size=3, padding=1))
+            # 每个像素上有nd个预测框，每个预测框对21个class都有一个置信度
             confidence_extractors.append(nn.Conv2d(oc, nd * self.num_classes, kernel_size=3, padding=1))
 
+        # 容纳其他对象，使其成为一个神经网络中的层
         self.loc = nn.ModuleList(location_extractors)
         self.conf = nn.ModuleList(confidence_extractors)
         self._init_weights()
 
+        # [8732,4]:一共8732个default box，每个dbox有四个位置参数，这里是两点坐标的形式
         default_box = dboxes300_coco()
         self.compute_loss = Loss(default_box)
         self.encoder = Encoder(default_box)
         self.postprocess = PostProcess(default_box)
 
     def _build_additional_features(self, input_size):
-        """
-        为backbone(resnet50)添加额外的一系列卷积层，得到相应的一系列特征提取器
-        :param input_size:
-        :return:
-        """
+        # 为backbone(resnet50)添加额外的一系列卷积层，得到相应的一系列特征提取器
         additional_blocks = []
         # input_size = [1024, 512, 512, 256, 256, 256] for resnet50
-        middle_channels = [256, 256, 128, 128, 128]
+        middle_channels = [256, 256, 128, 128, 128]  # 每个conv第一层的size
         for i, (input_ch, output_ch, middle_ch) in enumerate(zip(input_size[:-1], input_size[1:], middle_channels)):
             padding, stride = (1, 2) if i < 3 else (0, 1)
             layer = nn.Sequential(
@@ -94,20 +87,23 @@ class SSD300(nn.Module):
         locs = []
         confs = []
         for f, l, c in zip(features, loc_extractor, conf_extractor):
-            # [batch, n*4, feat_size, feat_size] -> [batch, 4, -1]
+            # [batch, n*4, feat_size, feat_size] -> [batch, 4, n*feat_size*feat_size]
             locs.append(l(f).view(f.size(0), 4, -1))
-            # [batch, n*classes, feat_size, feat_size] -> [batch, classes, -1]
+            # [batch, classes, feat_size, feat_size] -> [batch, classes, n*feat_size*feat_size]
             confs.append(c(f).view(f.size(0), self.num_classes, -1))
 
+        # 在第二维度上拼接，调整成连续存储的方式
         locs, confs = torch.cat(locs, 2).contiguous(), torch.cat(confs, 2).contiguous()
         return locs, confs
 
     def forward(self, image, targets=None):
-        x = self.feature_extractor(image)
+        # 使用情景是：losses_dict = model(images, targets)
+        x = self.feature_extractor(image)  # backbone的输出，即38×38×1024
 
-        # Feature Map 38x38x1024, 19x19x512, 10x10x512, 5x5x256, 3x3x256, 1x1x256
+        # Feature Map：38x38x1024, 19x19x512, 10x10x512, 5x5x256, 3x3x256, 1x1x256
+        # 类型为Tensor列表，该列表最初为空
         detection_features = torch.jit.annotate(List[Tensor], [])  # [x]
-        detection_features.append(x)
+        detection_features.append(x)  # 预测特征层1
         for layer in self.additional_blocks:
             x = layer(x)
             detection_features.append(x)
@@ -140,7 +136,6 @@ class SSD300(nn.Module):
 
 class Loss(nn.Module):
     """
-        Implements the loss as the sum of the followings:
         1. Confidence Loss: All labels, with hard negative mining
         2. Localization Loss: Only on positive labels
         Suppose input dboxes has the shape 8732x4
@@ -149,23 +144,23 @@ class Loss(nn.Module):
         super(Loss, self).__init__()
         # Two factor are from following links
         # http://jany.st/post/2017-11-05-single-shot-detector-ssd-from-scratch-in-tensorflow.html
+        # 回归参数的缩放因子，使网络更快收敛
         self.scale_xy = 1.0 / dboxes.scale_xy  # 10
         self.scale_wh = 1.0 / dboxes.scale_wh  # 5
 
-        self.location_loss = nn.SmoothL1Loss(reduction='none')
         # [num_anchors, 4] -> [4, num_anchors] -> [1, 4, num_anchors]
-        self.dboxes = nn.Parameter(dboxes(order="xywh").transpose(0, 1).unsqueeze(dim=0),
-                                   requires_grad=False)
+        self.dboxes = nn.Parameter(dboxes(order="xywh").transpose(0, 1).unsqueeze(dim=0), requires_grad=False)
 
+        # 定位损失
+        self.location_loss = nn.SmoothL1Loss(reduction='none')
+        # 分类损失
         self.confidence_loss = nn.CrossEntropyLoss(reduction='none')
 
     def _location_vec(self, loc):
         # type: (Tensor) -> Tensor
         """
-        Generate Location Vectors
-        计算ground truth相对anchors的回归参数
-        :param loc: anchor匹配到的对应GTBOX Nx4x8732
-        :return:
+        计算ground truth相对default box的回归参数
+        param loc: anchor匹配到的对应GTBOX Nx4x8732
         """
         gxy = self.scale_xy * (loc[:, :2, :] - self.dboxes[:, :2, :]) / self.dboxes[:, 2:, :]  # Nx2x8732
         gwh = self.scale_wh * (loc[:, 2:, :] / self.dboxes[:, 2:, :]).log()  # Nx2x8732
@@ -180,13 +175,13 @@ class Loss(nn.Module):
             gloc, glabel: Nx4x8732, Nx8732
                 ground truth location and labels
         """
-        # 获取正样本的mask  Tensor: [N, 8732]
+        # 获取正样本的mask，即ground truth中
+        # Tensor: [N, 8732],N是一个batch的图片个数，batchsize
+        # 每个图片也对应8732个gtbox，每个上会有一个事先人为打好的label
         mask = torch.gt(glabel, 0)  # (gt: >)
-        # mask1 = torch.nonzero(glabel)
-        # 计算一个batch中的每张图片的正样本个数 Tensor: [N]
-        pos_num = mask.sum(dim=1)
+        pos_num = mask.sum(dim=1)  # 计算一个batch中的每张图片的正样本个数 Tensor: [N]
 
-        # 计算gt的location回归参数 Tensor: [N, 4, 8732]
+        # 计算gt的location回归参数 Tensor: [N, 4, 8732]，见定位损失公式
         vec_gd = self._location_vec(gloc)
 
         # sum on four coordinates, and mask

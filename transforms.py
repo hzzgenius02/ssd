@@ -188,12 +188,14 @@ class AssignGTtoDefaultBox(object):
     """将DefaultBox与GT进行匹配"""
     def __init__(self):
         self.default_box = dboxes300_coco()
-        self.encoder = Encoder(self.default_box)
+        self.encoder = Encoder(self.default_box)  # 用default box参数初始化
 
     def __call__(self, image, target):
+        # 标注好的gtbox坐标和标签
         boxes = target['boxes']
         labels = target["labels"]
         # bboxes_out (Tensor 8732 x 4), labels_out (Tensor 8732)
+        # 输入gtbox参数，将gt与default box匹配
         bboxes_out, labels_out = self.encoder.encode(boxes, labels)
         target['boxes'] = bboxes_out
         target['labels'] = labels_out

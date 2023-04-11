@@ -8,45 +8,6 @@ from torch import nn, Tensor
 import numpy as np
 
 
-# This function is from https://github.com/kuangliu/pytorch-ssd.
-# def calc_iou_tensor(box1, box2):
-#     """ Calculation of IoU based on two boxes tensor,
-#         Reference to https://github.com/kuangliu/pytorch-src
-#         input:
-#             box1 (N, 4)  format [xmin, ymin, xmax, ymax]
-#             box2 (M, 4)  format [xmin, ymin, xmax, ymax]
-#         output:
-#             IoU (N, M)
-#     """
-#     N = box1.size(0)
-#     M = box2.size(0)
-#
-#     # (N, 4) -> (N, 1, 4) -> (N, M, 4)
-#     be1 = box1.unsqueeze(1).expand(-1, M, -1)  # -1 means not changing the size of that dimension
-#     # (M, 4) -> (1, M, 4) -> (N, M, 4)
-#     be2 = box2.unsqueeze(0).expand(N, -1, -1)
-#
-#     # Left Top and Right Bottom
-#     lt = torch.max(be1[:, :, :2], be2[:, :, :2])
-#     rb = torch.min(be1[:, :, 2:], be2[:, :, 2:])
-#
-#     # compute intersection area
-#     delta = rb - lt  # width and height
-#     delta[delta < 0] = 0
-#     # width * height
-#     intersect = delta[:, :, 0] * delta[:, :, 1]
-#
-#     # compute bel1 area
-#     delta1 = be1[:, :, 2:] - be1[:, :, :2]
-#     area1 = delta1[:, :, 0] * delta1[:, :, 1]
-#     # compute bel2 area
-#     delta2 = be2[:, :, 2:] - be2[:, :, :2]
-#     area2 = delta2[:, :, 0] * delta2[:, :, 1]
-#
-#     iou = intersect / (area1 + area2 - intersect)
-#     return iou
-
-
 def box_area(boxes):
     """
     Computes the area of a set of bounding boxes, which are specified by its
@@ -64,6 +25,7 @@ def box_area(boxes):
 
 def calc_iou_tensor(boxes1, boxes2):
     """
+    https://fastly.jsdelivr.net/gh/hzzgenius02/Image@main/ssd/Snipaste_2023-04-11_01-09-50.png
     Return intersection-over-union (Jaccard index) of boxes.
 
     Both sets of boxes are expected to be in (x1, y1, x2, y2) format.
@@ -76,25 +38,25 @@ def calc_iou_tensor(boxes1, boxes2):
         iou (Tensor[N, M]): the NxM matrix containing the pairwise
             IoU values for every element in boxes1 and boxes2
     """
-    area1 = box_area(boxes1)
-    area2 = box_area(boxes2)
+    area1 = box_area(boxes1)  # Tensor[N]
+    area2 = box_area(boxes2)  # Tensor[M]
 
     #  When the shapes do not match,
-    #  the shape of the returned output tensor follows the broadcasting rules
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # left-top [N,M,2]
-    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # right-bottom [N,M,2]
+    #  the shape of the returned output tensor follows the broadcasting rules，实现方法就是用none
+    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # left-top [N,M,2]，交集部分的左上角
+    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # right-bottom [N,M,2]，交集部分的右下角
 
     wh = (rb - lt).clamp(min=0)  # [N,M,2]
-    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
+    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]，两框的交集面积
 
     iou = inter / (area1[:, None] + area2 - inter)
     return iou
 
 
+# 正负样本匹配
 # This function is from https://github.com/kuangliu/pytorch-ssd.
 class Encoder(object):
     """
-        Inspired by https://github.com/kuangliu/pytorch-src
         Transform between (bboxes, lables) <-> SSD output
 
         dboxes: default boxes in size 8732 x 4,
@@ -122,28 +84,32 @@ class Encoder(object):
     def encode(self, bboxes_in, labels_in, criteria=0.5):
         """
         encode:
-            input  : bboxes_in (Tensor nboxes x 4), labels_in (Tensor nboxes)
+            input  : bboxes_in：gt坐标信息(Tensor nboxes x 4), labels_in：gt的标签(Tensor nboxes)
             output : bboxes_out (Tensor 8732 x 4), labels_out (Tensor 8732)
             criteria : IoU threshold of bboexes
         """
-        # [nboxes, 8732]
+        # https://fastly.jsdelivr.net/gh/hzzgenius02/Image@main/ssd/Snipaste_2023-04-11_01-09-50.png
+        # [bboxes, 8732]
         ious = calc_iou_tensor(bboxes_in, self.dboxes)  # 计算每个GT与default box的iou
         # [8732,]
-        best_dbox_ious, best_dbox_idx = ious.max(dim=0)  # 寻找每个default box匹配到的最大IoU
-        # [nboxes,]
-        best_bbox_ious, best_bbox_idx = ious.max(dim=1)  # 寻找每个GT匹配到的最大IoU
+        best_dbox_ious, best_dbox_idx = ious.max(dim=0)  # 寻找每个default box匹配到的最大IoU、对应的gtbox的index
+        # [bboxes,]
+        best_bbox_ious, best_bbox_idx = ious.max(dim=1)  # 寻找每个GT匹配到的最大IoU、对应的dbox的index
 
-        # 将每个GT匹配到的最佳default box设置为正样本（对应论文中Matching strategy的第一条）
+        # https://fastly.jsdelivr.net/gh/hzzgenius02/Image@main/ssd/Snipaste_2023-04-11_16-57-00.png
+        # 正样本选取1：将每个GT，和它的iou值最大的default box设置为正样本
         # set best ious 2.0
         best_dbox_ious.index_fill_(0, best_bbox_idx, 2.0)  # dim, index, value
         # 将相应default box匹配最大IOU的GT索引进行替换
         idx = torch.arange(0, best_bbox_idx.size(0), dtype=torch.int64)
+        # 修改每个default box匹配到的最佳gt的索引
         best_dbox_idx[best_bbox_idx[idx]] = idx
 
         # filter IoU > 0.5
         # 寻找与GT iou大于0.5的default box,对应论文中Matching strategy的第二条(这里包括了第一条匹配到的信息)
         masks = best_dbox_ious > criteria
         # [8732,]
+        # 获取所有正样本对应的label
         labels_out = torch.zeros(self.nboxes, dtype=torch.int64)
         labels_out[masks] = labels_in[best_dbox_idx[masks]]
         # 将default box匹配到正样本的位置设置成对应GT的box信息
@@ -164,7 +130,6 @@ class Encoder(object):
     def scale_back_batch(self, bboxes_in, scores_in):
         """
             将box格式从xywh转换回ltrb, 将预测目标score通过softmax处理
-            Do scale and transform from xywh to ltrb
             suppose input N x 4 x num_bbox | N x label_num x num_bbox
 
             bboxes_in: 是网络预测的xywh回归参数
@@ -342,7 +307,7 @@ class DefaultBoxes(object):
     def __init__(self, fig_size, feat_size, steps, scales, aspect_ratios, scale_xy=0.1, scale_wh=0.2):
         self.fig_size = fig_size   # 输入网络的图像大小 300
         # [38, 19, 10, 5, 3, 1]
-        self.feat_size = feat_size  # 每个预测层的feature map尺寸
+        self.feat_size = feat_size  # 每个feature map的尺寸
 
         self.scale_xy_ = scale_xy
         self.scale_wh_ = scale_wh
@@ -355,31 +320,40 @@ class DefaultBoxes(object):
         # [21, 45, 99, 153, 207, 261, 315]
         self.scales = scales  # 每个特征层上预测的default box的scale
 
-        fk = fig_size / np.array(steps)     # 计算每层特征层的fk
-        # [[2], [2, 3], [2, 3], [2, 3], [2], [2]]
-        self.aspect_ratios = aspect_ratios  # 每个预测特征层上预测的default box的ratios
+        # 计算每层特征层的fk
+        # 第k个feature map的大小，用输入图像大小除以跨度（而非直接使用feat_size）
+        fk = fig_size / np.array(steps)  # [37.5, 18.75, 9.375, 4.6875, 3, 1]
+        # 每个预测特征层上预测的default box的高宽比
+        self.aspect_ratios = aspect_ratios  # [[2], [2, 3], [2, 3], [2, 3], [2], [2]]
 
         self.default_boxes = []
         # size of feature and number of feature
         # 遍历每层特征层，计算default box
-        for idx, sfeat in enumerate(self.feat_size):
-            sk1 = scales[idx] / fig_size  # scale转为相对值[0-1]
-            sk2 = scales[idx + 1] / fig_size  # scale转为相对值[0-1]
+        # feat_size:[38, 19, 10, 5, 3, 1]           每个feature map的尺寸
+        # scales:[21, 45, 99, 153, 207, 261, 315]   每个特征层上default box的尺寸
+        # fig_size:300
+        # aspect_ratios:[[2], [2, 3], [2, 3], [2, 3], [2], [2]] 高宽比
+        for layer, sfeat in enumerate(self.feat_size):
+            sk1 = scales[layer] / fig_size  # scale转为相对值[0-1]
+            sk2 = scales[layer + 1] / fig_size
             sk3 = sqrt(sk1 * sk2)
+
             # 先添加两个1:1比例的default box宽和高
             all_sizes = [(sk1, sk1), (sk3, sk3)]
-
             # 再将剩下不同比例的default box宽和高添加到all_sizes中
-            for alpha in aspect_ratios[idx]:
+            for alpha in self.aspect_ratios[layer]:
                 w, h = sk1 * sqrt(alpha), sk1 / sqrt(alpha)
                 all_sizes.append((w, h))
                 all_sizes.append((h, w))
 
             # 计算当前特征层对应原图上的所有default box
-            for w, h in all_sizes:
-                for i, j in itertools.product(range(sfeat), repeat=2):  # i -> 行（y）， j -> 列（x）
+            # default box的坐标是相对于（size假设为1的）feature map的
+            for i, j in itertools.product(range(sfeat), repeat=2):  # i -> 行（y）， j -> 列（x）
+                for w, h in all_sizes:
                     # 计算每个default box的中心坐标（范围是在0-1之间）
-                    cx, cy = (j + 0.5) / fk[idx], (i + 0.5) / fk[idx]
+                    cx, cy = (j + 0.5) / fk[layer], (i + 0.5) / fk[layer]
+                    # 0.46 0.38 0.07 0.07
+                    # 0.43 -0.021 0.50 0.048
                     self.default_boxes.append((cx, cy, w, h))
 
         # 将default_boxes转为tensor格式
@@ -404,7 +378,7 @@ class DefaultBoxes(object):
         return self.scale_wh_
 
     def __call__(self, order='ltrb'):
-        # 根据需求返回对应格式的default box
+        # 根据需求返回对应格式的default box[8732,4]，默认是两点坐标
         if order == 'ltrb':
             return self.dboxes_ltrb
 
@@ -414,8 +388,8 @@ class DefaultBoxes(object):
 
 def dboxes300_coco():
     figsize = 300  # 输入网络的图像大小
-    feat_size = [38, 19, 10, 5, 3, 1]   # 每个预测层的feature map尺寸
-    steps = [8, 16, 32, 64, 100, 300]   # 每个特征层上的一个cell在原图上的跨度
+    feat_size = [38, 19, 10, 5, 3, 1]   # 每个feature map的尺寸
+    steps = [8, 16, 32, 64, 100, 300]   # 每个feature map上的一个cell在原图上的跨度
     # use the scales here: https://github.com/amdegroot/ssd.pytorch/blob/master/data/config.py
     scales = [21, 45, 99, 153, 207, 261, 315]  # 每个特征层上预测的default box的scale
     aspect_ratios = [[2], [2, 3], [2, 3], [2, 3], [2], [2]]  # 每个预测特征层上预测的default box的ratios
@@ -511,7 +485,7 @@ class PostProcess(nn.Module):
         self.scale_xy = dboxes.scale_xy  # 0.1
         self.scale_wh = dboxes.scale_wh  # 0.2
 
-        self.criteria = 0.5
+        self.criteria = 0.5  # iou阈值
         self.max_output = 100
 
     def scale_back_batch(self, bboxes_in, scores_in):
@@ -520,7 +494,6 @@ class PostProcess(nn.Module):
             1）通过预测的boxes回归参数得到最终预测坐标
             2）将box格式从xywh转换回ltrb
             3）将预测目标score通过softmax处理
-            Do scale and transform from xywh to ltrb
             suppose input N x 4 x num_bbox | N x label_num x num_bbox
 
             bboxes_in: [N, 4, 8732]是网络预测的xywh回归参数
@@ -552,9 +525,10 @@ class PostProcess(nn.Module):
         bboxes_in[:, :, 2] = r  # xmax
         bboxes_in[:, :, 3] = b  # ymax
 
-        # scores_in: [batch, 8732, label_num]
+        # scores_in: [batch, 8732, label_num]，在最后一个维度上softmax
         return bboxes_in, F.softmax(scores_in, dim=-1)
 
+    # 改进
     def decode_single_new(self, bboxes_in, scores_in, criteria, num_output):
         # type: (Tensor, Tensor, float, int) -> Tuple[Tensor, Tensor, Tensor]
         """

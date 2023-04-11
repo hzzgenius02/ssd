@@ -223,5 +223,5 @@ if __name__ == "__main__":
                         help='batch size when validation.')
 
     args = parser.parse_args()
-
+    print(args)
     main(args)
